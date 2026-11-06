@@ -30,10 +30,12 @@ pub struct Lock {
     locked: bool,
     unlock_requested: bool,
     checking: bool,
+    /// Bumped on every lock and unlock: a PAM result only counts for the lock it was started in.
+    generation: u64,
     logind: Option<Arc<Logind>>,
     inhibitor: Option<OwnedFd>,
     marker: Option<PathBuf>,
-    auth_tx: Option<Sender<AuthEvent>>,
+    auth_tx: Option<Sender<(u64, AuthEvent)>>,
 }
 
 impl Lock {
@@ -44,6 +46,7 @@ impl Lock {
             locked: false,
             unlock_requested: false,
             checking: false,
+            generation: 0,
             logind: None,
             inhibitor: None,
             marker: None,
@@ -60,11 +63,11 @@ fn this(app: &mut App) -> &mut Lock {
 }
 
 pub fn init(app: &mut App) -> Result<(), String> {
-    let (tx, rx) = channel::channel::<AuthEvent>();
+    let (tx, rx) = channel::channel::<(u64, AuthEvent)>();
     app.handle
         .insert_source(rx, |ev, _, app: &mut App| {
-            if let ChannelEvent::Msg(e) = ev {
-                on_auth(app, e);
+            if let ChannelEvent::Msg((generation, e)) = ev {
+                on_auth(app, generation, e);
             }
         })
         .map_err(|e| e.to_string())?;
@@ -172,6 +175,7 @@ pub fn start(app: &mut App) -> Result<(), String> {
     l.locked = false;
     l.unlock_requested = false;
     l.checking = false;
+    l.generation += 1;
     app.ui.clear();
     app.ui.busy = false;
     app.ui.masked = true;
@@ -238,6 +242,7 @@ pub fn finished(app: &mut App, _lock: SessionLock) {
     l.lock = None;
     l.locked = false;
     l.checking = false;
+    l.generation += 1;
     if let Some(m) = &l.marker {
         let _ = std::fs::remove_file(m);
     }
@@ -264,6 +269,7 @@ fn unlock(app: &mut App) {
     l.lock = None;
     l.locked = false;
     l.checking = false;
+    l.generation += 1;
     if let Some(m) = &l.marker {
         let _ = std::fs::remove_file(m);
     }
@@ -294,6 +300,7 @@ pub fn submit(app: &mut App) {
     }
     let Some(tx) = l.auth_tx.clone() else { return };
     l.checking = true;
+    let generation = l.generation;
     let password = app.ui.take_password();
     app.ui.busy = true;
     app.ui.set_status(Tone::Busy, "Checking…");
@@ -301,11 +308,11 @@ pub fn submit(app: &mut App) {
         let msg_tx = tx.clone();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             auth::check(&service, &user, password, |m| {
-                let _ = msg_tx.send(AuthEvent::Message(m));
+                let _ = msg_tx.send((generation, AuthEvent::Message(m)));
             })
         }))
         .unwrap_or_else(|_| Err("Authentication failed (internal error)".into()));
-        let _ = tx.send(AuthEvent::Done(r));
+        let _ = tx.send((generation, AuthEvent::Done(r)));
     });
     if let Err(e) = spawned {
         this(app).checking = false;
@@ -314,7 +321,13 @@ pub fn submit(app: &mut App) {
     }
 }
 
-fn on_auth(app: &mut App, ev: AuthEvent) {
+fn on_auth(app: &mut App, generation: u64, ev: AuthEvent) {
+    let l = this(app);
+    if generation != l.generation || !l.checking {
+        // From a lock that's already over (unlocked by logind, or ended by the compositor).
+        log::debug!("ignoring a stale PAM result");
+        return;
+    }
     match ev {
         AuthEvent::Message(m) => app.ui.set_status(if m.error { Tone::Error } else { Tone::Info }, m.text),
         AuthEvent::Done(Ok(())) => {

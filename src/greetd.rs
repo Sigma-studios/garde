@@ -30,6 +30,29 @@ pub enum Event {
 
 pub const WRONG_PASSWORD: &str = "Wrong password";
 
+/// PAM messages of one attempt. A failure is explained by its error messages if any, else its
+/// info messages (faillock's "account locked" is info, and comes before the password prompt
+/// because `auth required pam_faillock.so preauth` lets the stack continue), else nothing.
+#[derive(Debug, Default)]
+pub struct Messages {
+    errors: Vec<String>,
+    infos: Vec<String>,
+}
+
+impl Messages {
+    pub fn push(&mut self, error: bool, text: &str) {
+        let text = text.trim();
+        if !text.is_empty() {
+            if error { &mut self.errors } else { &mut self.infos }.push(text.to_string());
+        }
+    }
+
+    pub fn explanation(&self) -> Option<String> {
+        let m = if self.errors.is_empty() { &self.infos } else { &self.errors };
+        (!m.is_empty()).then(|| m.join(" "))
+    }
+}
+
 fn write_req(s: &mut impl Write, req: &Request) -> std::io::Result<()> {
     // Serialize into a buffer we wipe afterwards: it may hold the password.
     let mut body = Zeroizing::new(Vec::with_capacity(4096));
@@ -91,7 +114,7 @@ fn drive<S: Read + Write>(
         // The Enter press this attempt answers with; spent whether or not a prompt comes.
         let mut attempt = queued.take();
         let mut answered = false;
-        let mut last_error: Option<String> = None;
+        let mut msgs = Messages::default();
         let mut launch: Option<(Vec<String>, Vec<String>)> = None;
         let mut starting = false;
         loop {
@@ -118,9 +141,7 @@ fn drive<S: Read + Write>(
                 }
                 Response::AuthMessage { auth_message_type: t, auth_message } => {
                     let error = matches!(t, AuthMessageType::Error);
-                    if error {
-                        last_error = Some(auth_message.clone());
-                    }
+                    msgs.push(error, &auth_message);
                     emit(Event::Message { error, text: auth_message });
                     resp = round_trip(s, &Request::PostAuthMessageResponse { response: None })?;
                 }
@@ -144,8 +165,8 @@ fn drive<S: Read + Write>(
                 }
                 Response::Error { error_type, description } => {
                     let msg = match error_type {
-                        // Prefer what PAM said (faillock's "account locked" etc.).
-                        ErrorType::AuthError => last_error.take().unwrap_or_else(|| WRONG_PASSWORD.into()),
+                        // Prefer what PAM said (faillock's "account locked", sent as info).
+                        ErrorType::AuthError => msgs.explanation().unwrap_or_else(|| WRONG_PASSWORD.into()),
                         ErrorType::Error => description,
                     };
                     emit(Event::Failed(msg));
@@ -204,32 +225,42 @@ mod tests {
         .unwrap();
     }
 
-    /// A mock greetd accepting password "right", like fakegreet but with a faillock-style
-    /// lock-out after the second failure.
-    fn mock_greetd(mut s: UnixStream) {
+    #[derive(Clone, Copy)]
+    enum Lockout {
+        /// `auth required pam_faillock.so preauth`: says the account is locked (info), then
+        /// still asks for the password and fails.
+        Required,
+        /// `auth requisite ...`: fails right away without asking anything.
+        Requisite,
+    }
+
+    const LOCKED: &str = "The account is locked due to 2 failed logins.";
+    const LEFT: &str = "(10 minutes left to unlock)";
+
+    /// A mock greetd accepting password "right", locking the account after two failures.
+    fn mock_greetd(mut s: UnixStream, style: Lockout) {
         let mut failures = 0;
         loop {
             let req = recv_req(&mut s);
             match req["type"].as_str().unwrap() {
                 "create_session" => {
                     assert_eq!(req["username"], "sigma");
-                    if failures >= 2 {
-                        send(&mut s, Response::AuthMessage {
-                            auth_message_type: AuthMessageType::Error,
-                            auth_message: "The account is locked due to 2 failed logins.".into(),
-                        });
-                        assert_eq!(recv_req(&mut s)["response"], serde_json::Value::Null);
-                        send(&mut s, Response::Error { error_type: ErrorType::AuthError, description: "pam_authenticate: AUTH_ERR".into() });
-                        continue;
+                    let locked = failures >= 2;
+                    if locked {
+                        for m in [LOCKED, LEFT] {
+                            let ty = if matches!(style, Lockout::Required) { AuthMessageType::Info } else { AuthMessageType::Error };
+                            send(&mut s, Response::AuthMessage { auth_message_type: ty, auth_message: m.into() });
+                            assert_eq!(recv_req(&mut s)["response"], serde_json::Value::Null);
+                        }
+                        if matches!(style, Lockout::Requisite) {
+                            send(&mut s, Response::Error { error_type: ErrorType::AuthError, description: "pam_authenticate: AUTH_ERR".into() });
+                            continue;
+                        }
                     }
-                    send(&mut s, Response::AuthMessage {
-                        auth_message_type: AuthMessageType::Info,
-                        auth_message: "Welcome".into(),
-                    });
-                    assert_eq!(recv_req(&mut s)["type"], "post_auth_message_response");
                     send(&mut s, secret("Password:"));
                     let r = recv_req(&mut s);
-                    if r["response"] == "right" {
+                    assert_eq!(r["type"], "post_auth_message_response");
+                    if r["response"] == "right" && !locked {
                         send(&mut s, Response::Success);
                     } else {
                         failures += 1;
@@ -248,27 +279,34 @@ mod tests {
         }
     }
 
-    fn start() -> (mpsc::Sender<Cmd>, mpsc::Receiver<Event>, thread::JoinHandle<()>, thread::JoinHandle<()>) {
+    fn start(style: Lockout) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Event>, thread::JoinHandle<()>, thread::JoinHandle<()>) {
         let (a, b) = UnixStream::pair().unwrap();
-        let mock = thread::spawn(move || mock_greetd(b));
+        let mock = thread::spawn(move || mock_greetd(b, style));
         let (ctx, crx) = mpsc::channel();
         let (etx, erx) = mpsc::channel();
         let worker = thread::spawn(move || run(a, "sigma", crx, move |e| etx.send(e).unwrap()));
         (ctx, erx, mock, worker)
     }
 
-    fn info(t: &str) -> Event {
-        Event::Message { error: false, text: t.into() }
+    fn msg(error: bool, t: &str) -> Event {
+        Event::Message { error, text: t.into() }
     }
 
     fn prompt() -> Event {
         Event::Prompt { secret: true, text: "Password:".into() }
     }
 
+    fn fail_twice(tx: &mpsc::Sender<Cmd>, rx: &mpsc::Receiver<Event>) {
+        for _ in 0..2 {
+            assert_eq!(rx.recv().unwrap(), prompt());
+            submit(tx, "wrong");
+            assert_eq!(rx.recv().unwrap(), Event::Failed(WRONG_PASSWORD.into()));
+        }
+    }
+
     #[test]
     fn successful_login() {
-        let (tx, rx, mock, worker) = start();
-        assert_eq!(rx.recv().unwrap(), info("Welcome"));
+        let (tx, rx, mock, worker) = start(Lockout::Required);
         assert_eq!(rx.recv().unwrap(), prompt());
         submit(&tx, "right");
         assert_eq!(rx.recv().unwrap(), Event::Started);
@@ -278,13 +316,11 @@ mod tests {
 
     #[test]
     fn wrong_password_then_retry() {
-        let (tx, rx, mock, worker) = start();
-        assert_eq!(rx.recv().unwrap(), info("Welcome"));
+        let (tx, rx, mock, worker) = start(Lockout::Required);
         assert_eq!(rx.recv().unwrap(), prompt());
         submit(&tx, "wrong");
         assert_eq!(rx.recv().unwrap(), Event::Failed(WRONG_PASSWORD.into()));
         // A fresh session for the same user, ready for the next try.
-        assert_eq!(rx.recv().unwrap(), info("Welcome"));
         assert_eq!(rx.recv().unwrap(), prompt());
         submit(&tx, "right");
         assert_eq!(rx.recv().unwrap(), Event::Started);
@@ -293,27 +329,49 @@ mod tests {
     }
 
     #[test]
-    fn locked_account_relays_pam_text_and_does_not_spin() {
-        let (tx, rx, mock, worker) = start();
-        for _ in 0..2 {
-            assert_eq!(rx.recv().unwrap(), info("Welcome"));
-            assert_eq!(rx.recv().unwrap(), prompt());
-            submit(&tx, "wrong");
-            assert_eq!(rx.recv().unwrap(), Event::Failed(WRONG_PASSWORD.into()));
-        }
-        let locked = "The account is locked due to 2 failed logins.";
-        assert_eq!(rx.recv().unwrap(), Event::Message { error: true, text: locked.into() });
-        assert_eq!(rx.recv().unwrap(), Event::Failed(locked.into()));
+    fn faillock_info_explains_the_failure() {
+        let (tx, rx, mock, worker) = start(Lockout::Required);
+        fail_twice(&tx, &rx);
+        assert_eq!(rx.recv().unwrap(), msg(false, LOCKED));
+        assert_eq!(rx.recv().unwrap(), msg(false, LEFT));
+        assert_eq!(rx.recv().unwrap(), prompt());
+        submit(&tx, "right");
+        assert_eq!(rx.recv().unwrap(), Event::Failed(format!("{LOCKED} {LEFT}")));
+        drop(tx);
+        drop(rx);
+        let _ = worker.join();
+        let _ = mock.join();
+    }
+
+    #[test]
+    fn lockout_without_prompt_does_not_spin() {
+        let (tx, rx, mock, worker) = start(Lockout::Requisite);
+        fail_twice(&tx, &rx);
+        assert_eq!(rx.recv().unwrap(), msg(true, LOCKED));
+        assert_eq!(rx.recv().unwrap(), msg(true, LEFT));
+        assert_eq!(rx.recv().unwrap(), Event::Failed(format!("{LOCKED} {LEFT}")));
         // No new attempt until the user presses Enter again.
         assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err());
         submit(&tx, "right");
-        assert_eq!(rx.recv().unwrap(), Event::Message { error: true, text: locked.into() });
-        assert_eq!(rx.recv().unwrap(), Event::Failed(locked.into()));
+        assert_eq!(rx.recv().unwrap(), msg(true, LOCKED));
+        assert_eq!(rx.recv().unwrap(), msg(true, LEFT));
+        assert_eq!(rx.recv().unwrap(), Event::Failed(format!("{LOCKED} {LEFT}")));
         drop(tx);
         worker.join().unwrap();
         drop(rx);
         // The mock blocks reading the next request; the worker hung up, so it panics on EOF.
         assert!(mock.join().is_err());
+    }
+
+    #[test]
+    fn messages_prefer_errors() {
+        let mut m = Messages::default();
+        assert_eq!(m.explanation(), None);
+        m.push(false, "Place your finger on the reader");
+        assert_eq!(m.explanation().as_deref(), Some("Place your finger on the reader"));
+        m.push(true, "Failed to match fingerprint");
+        m.push(true, "  ");
+        assert_eq!(m.explanation().as_deref(), Some("Failed to match fingerprint"));
     }
 
     #[test]

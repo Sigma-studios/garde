@@ -44,11 +44,11 @@ impl Painter {
         let line_h = (st.size * 1.3).ceil();
         let fs = &mut self.fonts;
         let mut buf = Buffer::new(fs, Metrics::new(st.size, line_h));
-        buf.set_wrap(fs, if st.max_lines > 1 { Wrap::WordOrGlyph } else { Wrap::None });
-        buf.set_size(fs, width, None);
+        buf.set_wrap(if st.max_lines > 1 { Wrap::WordOrGlyph } else { Wrap::None });
+        buf.set_size(width, None);
         let family = if self.family.is_empty() { Family::SansSerif } else { Family::Name(&self.family) };
         let attrs = Attrs::new().family(family).weight(if st.bold { Weight::SEMIBOLD } else { Weight::NORMAL });
-        buf.set_text(fs, text, &attrs, Shaping::Advanced);
+        buf.set_text(text, &attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(fs, false);
         buf
     }

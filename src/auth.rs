@@ -17,7 +17,19 @@ pub struct Message {
 struct Conv<F: FnMut(Message)> {
     password: Option<Zeroizing<String>>,
     on_message: F,
-    last_error: Option<String>,
+    msgs: crate::greetd::Messages,
+}
+
+impl<F: FnMut(Message)> Conv<F> {
+    fn record(&mut self, error: bool, msg: &CStr) {
+        let text = msg.to_string_lossy().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        log::debug!("PAM {}: {text}", if error { "error" } else { "info" });
+        self.msgs.push(error, &text);
+        (self.on_message)(Message { error, text });
+    }
 }
 
 impl<F: FnMut(Message)> ConversationHandler for Conv<F> {
@@ -38,20 +50,18 @@ impl<F: FnMut(Message)> ConversationHandler for Conv<F> {
     }
 
     fn text_info(&mut self, msg: &CStr) {
-        (self.on_message)(Message { error: false, text: msg.to_string_lossy().into_owned() });
+        self.record(false, msg);
     }
 
     fn error_msg(&mut self, msg: &CStr) {
-        let text = msg.to_string_lossy().into_owned();
-        self.last_error = Some(text.clone());
-        (self.on_message)(Message { error: true, text });
+        self.record(true, msg);
     }
 }
 
-/// Check `password` for `user` with PAM `service`. `Err` carries the text to show: PAM's own error
-/// message when it sent one (e.g. faillock's "account locked"), else a plain description.
+/// Check `password` for `user` with PAM `service`. `Err` carries the text to show: PAM's own
+/// messages when it sent some (e.g. faillock's "account locked"), else a plain description.
 pub fn check(service: &str, user: &str, password: Zeroizing<String>, on_message: impl FnMut(Message)) -> Result<(), String> {
-    let conv = Conv { password: Some(password), on_message, last_error: None };
+    let conv = Conv { password: Some(password), on_message, msgs: Default::default() };
     let mut ctx = pam_client::Context::new(service, Some(user), conv).map_err(|e| format!("PAM: {e}"))?;
     let res = ctx.authenticate(Flag::NONE).and_then(|()| match ctx.acct_mgmt(Flag::NONE) {
         // An expired password must not keep a running session locked forever.
@@ -67,8 +77,8 @@ pub fn check(service: &str, user: &str, password: Zeroizing<String>, on_message:
             Ok(())
         }
         Err(e) => {
-            let pam_text = ctx.conversation_mut().last_error.take();
-            Err(pam_text.unwrap_or_else(|| describe(e.code())))
+            log::debug!("PAM failed: {:?}", e.code());
+            Err(ctx.conversation().msgs.explanation().unwrap_or_else(|| describe(e.code())))
         }
     }
 }

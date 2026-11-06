@@ -1,0 +1,30 @@
+[package]
+name = "garde"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Login screen (greetd greeter) and Wayland lock screen sharing one look"
+license = "MIT"
+
+[dependencies]
+smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop"] }
+wayland-client = "0.31"
+xkbcommon = { version = "0.8", features = ["wayland"] }
+tiny-skia = "0.11"
+cosmic-text = "0.14"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+greetd_ipc = "0.10"
+serde_json = "1"
+pam-client = "0.5"
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
+zeroize = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+libc = "0.2"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

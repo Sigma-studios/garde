@@ -44,8 +44,12 @@ impl<F: FnMut(Message)> ConversationHandler for Conv<F> {
         let pw = self.password.take().ok_or(ErrorCode::CONV_ERR)?;
         let mut bytes = pw.as_bytes().to_vec();
         drop(pw);
-        let c = CString::new(bytes.clone()).map_err(|_| ErrorCode::CONV_ERR);
+        let c = CString::new(bytes.clone()).map_err(|e| {
+            e.into_vec().zeroize();
+            ErrorCode::CONV_ERR
+        });
         bytes.zeroize();
+        // The CString itself is handed to libpam through pam-client and dropped there unwiped.
         c
     }
 

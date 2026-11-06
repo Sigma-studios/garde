@@ -61,6 +61,8 @@ The name shown is the GECOS full name, falling back to the login name. Unknown k
   click on the layout pill cycles it locally, and a layout switch made by the compositor still wins.
   `numlock = true` turns num lock on locally (it flips the compositor's state, so the Num Lock key
   still toggles it); the keyboard LED may not follow. Caps lock is read from xkb's modifier state.
+- **Enter on an empty field** does nothing (people press it to wake the screen), so it never
+  costs a faillock attempt.
 - **Password**: kept in a `Zeroizing<String>` with 512 bytes reserved up front, so typing never
   reallocates. Backspace wipes the removed bytes, and the field is wiped after every attempt.
   Copies garde can't reach are not wiped: the `CString` handed to libpam, and greetd's own buffers.
@@ -82,7 +84,9 @@ The name shown is the GECOS full name, falling back to the login name. Unknown k
   garde dies the compositor keeps the session locked. `finished` (another locker won) makes
   `garde lock` exit 1, never unlocking.
 - **Daemon**: holds a logind delay inhibitor so sleep waits for the lock, sets the session's
-  `LockedHint`, and honours `Unlock` (as GNOME, KDE and cosmic-greeter do). While locked it keeps a
+  `LockedHint`, and honours `Unlock` (as GNOME, KDE and cosmic-greeter do). It accepts these
+  signals only as broadcasts from the current owner of `org.freedesktop.login1`; anything else on
+  the system bus could otherwise send garde a forged `Unlock`. While locked it keeps a
   marker in `$XDG_RUNTIME_DIR`. If it crashes, systemd restarts it, and the new instance sees the
   marker and takes the abandoned lock back over, so you get a password prompt again rather than a
   blank screen.

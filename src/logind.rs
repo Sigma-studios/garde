@@ -82,18 +82,40 @@ impl Logind {
     pub fn listen(&self, mut f: impl FnMut(Signal)) -> zbus::Result<()> {
         let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(DEST)?.build();
         let it = MessageIterator::for_match_rule(rule, &self.conn, Some(64))?;
+        // The match rule's well-known sender is not enforced locally, and anyone on the bus can
+        // send a signal straight to our unique name: check the real sender ourselves, or a
+        // forged `Unlock` would open the screen.
+        let dbus = zbus::blocking::fdo::DBusProxy::new(&self.conn)?;
+        let owner = || dbus.get_name_owner(DEST.try_into().expect("valid name")).ok().map(|o| o.to_string());
+        let mut logind = owner();
         for msg in it {
             let msg = msg?;
             let h = msg.header();
-            let (Some(member), Some(path)) = (h.member(), h.path()) else { continue };
+            let (Some(member), Some(path), Some(iface)) = (h.member(), h.path(), h.interface()) else { continue };
+            let sender = h.sender().map(|s| s.to_string());
+            if h.destination().is_some() {
+                log::warn!("ignoring a unicast {member} signal from {sender:?}");
+                continue;
+            }
+            if sender.is_none() || sender != logind {
+                // logind may have restarted under a new name.
+                logind = owner();
+                if sender.is_none() || sender != logind {
+                    log::warn!("ignoring {member} from {sender:?}: not logind ({logind:?})");
+                    continue;
+                }
+            }
+            let on_session = iface.as_str() == SESSION && path.as_str() == self.session.as_str();
             let sig = match member.as_str() {
-                "Lock" if path.as_str() == self.session.as_str() => Signal::Lock,
-                "Unlock" if path.as_str() == self.session.as_str() => Signal::Unlock,
-                "PrepareForSleep" if path.as_str() == PATH => match msg.body().deserialize::<bool>() {
-                    Ok(true) => Signal::Sleep,
-                    Ok(false) => Signal::Resume,
-                    Err(_) => continue,
-                },
+                "Lock" if on_session => Signal::Lock,
+                "Unlock" if on_session => Signal::Unlock,
+                "PrepareForSleep" if iface.as_str() == MANAGER && path.as_str() == PATH => {
+                    match msg.body().deserialize::<bool>() {
+                        Ok(true) => Signal::Sleep,
+                        Ok(false) => Signal::Resume,
+                        Err(_) => continue,
+                    }
+                }
                 _ => continue,
             };
             f(sig);

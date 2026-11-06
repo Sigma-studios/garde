@@ -93,6 +93,13 @@ fn recv(cmds: &Receiver<Cmd>) -> Option<Pending> {
     }
 }
 
+/// An Enter already pressed (e.g. while the previous failure was being cleaned up).
+fn already_submitted(cmds: &Receiver<Cmd>) -> Option<Pending> {
+    match cmds.try_recv().ok()? {
+        Cmd::Submit { password, cmd, env } => Some(Pending { password, cmd, env }),
+    }
+}
+
 /// Drive greetd until a session starts or the UI goes away. Never returns on a wrong password.
 pub fn run<S: Read + Write>(mut stream: S, user: &str, cmds: Receiver<Cmd>, emit: impl Fn(Event)) {
     if let Err(e) = drive(&mut stream, user, &cmds, &emit) {
@@ -118,7 +125,8 @@ fn drive<S: Read + Write>(s: &mut S, user: &str, cmds: &Receiver<Cmd>, emit: &im
                     auth_message_type: t @ (AuthMessageType::Secret | AuthMessageType::Visible),
                     auth_message,
                 } => {
-                    let p = match attempt.take() {
+                    // Already answered: don't announce a prompt the UI would show as idle.
+                    let p = match attempt.take().or_else(|| already_submitted(cmds)) {
                         Some(p) => p,
                         None => {
                             emit(Event::Prompt { secret: matches!(t, AuthMessageType::Secret), text: auth_message });

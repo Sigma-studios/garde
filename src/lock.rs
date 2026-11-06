@@ -239,6 +239,11 @@ pub fn finished(app: &mut App, _lock: SessionLock) {
     } else {
         log::error!("the compositor refused the lock (another locker is active?)");
     }
+    // After `locked`, the protocol only allows unlock_and_destroy, even once the compositor has
+    // ended the lock itself (it's already over, so this opens nothing).
+    if let (true, Some(lock)) = (was_locked, l.lock.take()) {
+        lock.unlock();
+    }
     l.lock = None;
     l.locked = false;
     l.checking = false;
@@ -292,6 +297,10 @@ fn unlock(app: &mut App) {
 }
 
 pub fn submit(app: &mut App) {
+    // Enter on an empty field (often just to wake the screen) must not cost a faillock attempt.
+    if app.ui.password().is_empty() {
+        return;
+    }
     let service = app.cfg.pam_service.clone();
     let user = app.cfg.user.clone();
     let l = this(app);

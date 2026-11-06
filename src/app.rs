@@ -258,7 +258,7 @@ impl App {
         if w == 0 || h == 0 {
             return;
         }
-        if s.scene.as_ref().is_none_or(|sc| (sc.width, sc.height) != (w, h)) {
+        if s.scene.as_ref().is_none_or(|sc| (sc.width, sc.height, sc.scale) != (w, h, scale as f32)) {
             let hints = matches!(self.mode, ModeState::Login(_)).then(|| self.ui.hints.clone()).flatten();
             let t = std::time::Instant::now();
             s.scene = Some(Scene::build(
@@ -599,8 +599,6 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for App {
             }
             wl_keyboard::Event::Key { key, state, .. } => {
                 let pressed = matches!(state, WEnum::Value(wl_keyboard::KeyState::Pressed));
-                // Keycodes only, never the text: this is a password field.
-                log::trace!("key {key} pressed={pressed}");
                 if !pressed {
                     if app.repeat.as_ref().is_some_and(|(k, _)| *k == key) {
                         app.stop_repeat();

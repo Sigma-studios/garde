@@ -132,6 +132,10 @@ fn on_greetd(app: &mut App, ev: Event) {
 }
 
 pub fn submit(app: &mut App) {
+    // An empty hidden prompt isn't an attempt worth sending (it would count against faillock).
+    if app.ui.masked && app.ui.password().is_empty() {
+        return;
+    }
     let wrapper = app.cfg.xsession_wrapper.clone();
     let l = this(app);
     let Some(session) = l.sessions.get(l.selected) else {

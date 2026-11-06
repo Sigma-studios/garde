@@ -100,12 +100,7 @@ pub fn run<S: Read + Write>(mut stream: S, user: &str, cmds: Receiver<Cmd>, emit
     }
 }
 
-fn drive<S: Read + Write>(
-    s: &mut S,
-    user: &str,
-    cmds: &Receiver<Cmd>,
-    emit: &impl Fn(Event),
-) -> std::io::Result<()> {
+fn drive<S: Read + Write>(s: &mut S, user: &str, cmds: &Receiver<Cmd>, emit: &impl Fn(Event)) -> std::io::Result<()> {
     // A submit typed while no prompt was pending (e.g. right after a failure that never asked
     // for a password); it answers the next prompt.
     let mut queued: Option<Pending> = None;
@@ -119,7 +114,10 @@ fn drive<S: Read + Write>(
         let mut starting = false;
         loop {
             match resp {
-                Response::AuthMessage { auth_message_type: t @ (AuthMessageType::Secret | AuthMessageType::Visible), auth_message } => {
+                Response::AuthMessage {
+                    auth_message_type: t @ (AuthMessageType::Secret | AuthMessageType::Visible),
+                    auth_message,
+                } => {
                     let p = match attempt.take() {
                         Some(p) => p,
                         None => {
@@ -248,12 +246,22 @@ mod tests {
                     let locked = failures >= 2;
                     if locked {
                         for m in [LOCKED, LEFT] {
-                            let ty = if matches!(style, Lockout::Required) { AuthMessageType::Info } else { AuthMessageType::Error };
+                            let ty = if matches!(style, Lockout::Required) {
+                                AuthMessageType::Info
+                            } else {
+                                AuthMessageType::Error
+                            };
                             send(&mut s, Response::AuthMessage { auth_message_type: ty, auth_message: m.into() });
                             assert_eq!(recv_req(&mut s)["response"], serde_json::Value::Null);
                         }
                         if matches!(style, Lockout::Requisite) {
-                            send(&mut s, Response::Error { error_type: ErrorType::AuthError, description: "pam_authenticate: AUTH_ERR".into() });
+                            send(
+                                &mut s,
+                                Response::Error {
+                                    error_type: ErrorType::AuthError,
+                                    description: "pam_authenticate: AUTH_ERR".into(),
+                                },
+                            );
                             continue;
                         }
                     }
@@ -264,7 +272,13 @@ mod tests {
                         send(&mut s, Response::Success);
                     } else {
                         failures += 1;
-                        send(&mut s, Response::Error { error_type: ErrorType::AuthError, description: "pam_authenticate: AUTH_ERR".into() });
+                        send(
+                            &mut s,
+                            Response::Error {
+                                error_type: ErrorType::AuthError,
+                                description: "pam_authenticate: AUTH_ERR".into(),
+                            },
+                        );
                     }
                 }
                 "start_session" => {
@@ -279,7 +293,9 @@ mod tests {
         }
     }
 
-    fn start(style: Lockout) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Event>, thread::JoinHandle<()>, thread::JoinHandle<()>) {
+    fn start(
+        style: Lockout,
+    ) -> (mpsc::Sender<Cmd>, mpsc::Receiver<Event>, thread::JoinHandle<()>, thread::JoinHandle<()>) {
         let (a, b) = UnixStream::pair().unwrap();
         let mock = thread::spawn(move || mock_greetd(b, style));
         let (ctx, crx) = mpsc::channel();

@@ -145,7 +145,13 @@ impl Keyboard {
     /// wl_keyboard.keymap (xkb v1 format).
     pub fn set_keymap_fd(&mut self, fd: OwnedFd, size: u32) {
         let km = unsafe {
-            xkb::Keymap::new_from_fd(&self.ctx, fd, size as usize, xkb::KEYMAP_FORMAT_TEXT_V1, xkb::KEYMAP_COMPILE_NO_FLAGS)
+            xkb::Keymap::new_from_fd(
+                &self.ctx,
+                fd,
+                size as usize,
+                xkb::KEYMAP_FORMAT_TEXT_V1,
+                xkb::KEYMAP_COMPILE_NO_FLAGS,
+            )
         };
         match km {
             Ok(Some(km)) => self.set_keymap(km),
@@ -269,9 +275,8 @@ impl Keyboard {
 
     fn is_k(&self, code: xkb::Keycode) -> bool {
         let Some(km) = &self.keymap else { return false };
-        (0..km.num_layouts()).any(|g| {
-            km.key_get_syms_by_level(code, g, 0).iter().any(|s| *s == xkb::Keysym::k || *s == xkb::Keysym::K)
-        })
+        (0..km.num_layouts())
+            .any(|g| km.key_get_syms_by_level(code, g, 0).iter().any(|s| *s == xkb::Keysym::k || *s == xkb::Keysym::K))
     }
 }
 
@@ -330,7 +335,8 @@ mod tests {
 
     fn keymap(layouts: &str) -> Option<Keyboard> {
         let mut kb = Keyboard::new(true);
-        let km = xkb::Keymap::new_from_names(&kb.ctx, "evdev", "pc105", layouts, "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)?;
+        let km =
+            xkb::Keymap::new_from_names(&kb.ctx, "evdev", "pc105", layouts, "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)?;
         kb.set_keymap(km);
         Some(kb)
     }

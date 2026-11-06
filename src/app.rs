@@ -21,9 +21,13 @@ use smithay_client_toolkit::{
         pointer::{CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer},
         Capability, SeatHandler, SeatState,
     },
-    session_lock::{SessionLock, SessionLockHandler, SessionLockState, SessionLockSurface, SessionLockSurfaceConfigure},
+    session_lock::{
+        SessionLock, SessionLockHandler, SessionLockState, SessionLockSurface, SessionLockSurfaceConfigure,
+    },
     shell::{
-        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure},
+        wlr_layer::{
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
+        },
         xdg::{
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
             XdgShell,
@@ -123,6 +127,7 @@ pub struct App {
     pointer: Option<ThemedPointer>,
     pub surfaces: Vec<OutSurface>,
     card_surface: Option<wayland_client::backend::ObjectId>,
+    drawn_card: Option<wayland_client::backend::ObjectId>,
     repeat: Option<(u32, RegistrationToken)>,
     blink: Option<RegistrationToken>,
 
@@ -179,6 +184,7 @@ impl App {
             pointer: None,
             surfaces: Vec::new(),
             card_surface: None,
+            drawn_card: None,
             repeat: None,
             blink: None,
             mode,
@@ -194,10 +200,23 @@ impl App {
 
     // ---- drawing -------------------------------------------------------------------------
 
-    /// Index of the surface showing the card: the one under the pointer, else the first.
+    /// Index of the surface showing the card: the one under the pointer, else the first output
+    /// (top-left in the compositor's layout).
     fn card_index(&self) -> Option<usize> {
-        let by_pointer = self.card_surface.as_ref().and_then(|id| self.surfaces.iter().position(|s| &s.wl_surface().id() == id));
-        by_pointer.or_else(|| self.surfaces.iter().position(|s| s.configured))
+        let by_pointer =
+            self.card_surface.as_ref().and_then(|id| self.surfaces.iter().position(|s| &s.wl_surface().id() == id));
+        by_pointer.or_else(|| {
+            let pos = |s: &OutSurface| {
+                s.output
+                    .as_ref()
+                    .and_then(|o| self.outputs.info(o))
+                    .and_then(|i| i.logical_position)
+                    .map(|(x, y)| (y, x))
+            };
+            (0..self.surfaces.len())
+                .filter(|&i| self.surfaces[i].configured)
+                .min_by_key(|&i| pos(&self.surfaces[i]).unwrap_or((i32::MAX, i as i32)))
+        })
     }
 
     /// The card changed: redraw it (only its output).
@@ -211,6 +230,19 @@ impl App {
     /// produce a single frame.
     pub fn flush(&mut self) {
         let card = self.card_index();
+        let card_id = card.map(|i| self.surfaces[i].wl_surface().id());
+        if card_id != self.drawn_card {
+            // The card moved: repaint where it was and where it goes.
+            if let Some(old) =
+                self.drawn_card.take().and_then(|id| self.surfaces.iter().position(|s| s.wl_surface().id() == id))
+            {
+                self.surfaces[old].dirty = true;
+            }
+            if let Some(i) = card {
+                self.surfaces[i].dirty = true;
+            }
+            self.drawn_card = card_id;
+        }
         for i in 0..self.surfaces.len() {
             if self.surfaces[i].dirty && self.surfaces[i].configured {
                 self.draw(i, card == Some(i));
@@ -229,7 +261,16 @@ impl App {
         if s.scene.as_ref().is_none_or(|sc| (sc.width, sc.height) != (w, h)) {
             let hints = matches!(self.mode, ModeState::Login(_)).then(|| self.ui.hints.clone()).flatten();
             let t = std::time::Instant::now();
-            s.scene = Some(Scene::build(&self.wallpaper, w, h, scale as f32, &self.geom, &self.look, hints.as_deref(), &mut self.painter));
+            s.scene = Some(Scene::build(
+                &self.wallpaper,
+                w,
+                h,
+                scale as f32,
+                &self.geom,
+                &self.look,
+                hints.as_deref(),
+                &mut self.painter,
+            ));
             log::debug!("scene {w}x{h}@{scale} built in {:?}", t.elapsed());
             s.bufs.retain(|b| b.size == (w, h));
         }
@@ -247,7 +288,15 @@ impl App {
                     }
                 };
                 let busy = Arc::new(AtomicBool::new(false));
-                let buffer = pool.create_buffer(0, w as i32, h as i32, stride as i32, wl_shm::Format::Xrgb8888, busy.clone(), &self.qh);
+                let buffer = pool.create_buffer(
+                    0,
+                    w as i32,
+                    h as i32,
+                    stride as i32,
+                    wl_shm::Format::Xrgb8888,
+                    busy.clone(),
+                    &self.qh,
+                );
                 s.bufs.push(Buf { pool, buffer, busy, size: (w, h), bg_valid: false });
                 s.bufs.len() - 1
             }
@@ -262,7 +311,8 @@ impl App {
             canvas.copy_from_slice(&scene.bg_xrgb);
             buf.bg_valid = true;
         }
-        let pm = if with_card { scene.render_card(&self.geom, &self.ui, &mut self.painter) } else { scene.plain_card() };
+        let pm =
+            if with_card { scene.render_card(&self.geom, &self.ui, &mut self.painter) } else { scene.plain_card() };
         let c = scene.card;
         blit(canvas, (w * 4) as usize, &pm, c.x, c.y);
 
@@ -291,6 +341,7 @@ impl App {
             layer.set_exclusive_zone(-1);
             layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
             layer.commit();
+            log::info!("login surface: layer-shell overlay");
             SurfKind::Layer(layer)
         } else if let Some(xdg) = &self.xdg_shell {
             let win = xdg.create_window(surface, WindowDecorations::None, &self.qh);
@@ -298,6 +349,7 @@ impl App {
             win.set_app_id("garde");
             win.set_fullscreen(output.as_ref());
             win.commit();
+            log::info!("login surface: fullscreen xdg toplevel");
             SurfKind::Window(win)
         } else {
             log::error!("compositor has neither layer-shell nor xdg-shell");
@@ -425,7 +477,13 @@ impl App {
 // ---- Wayland plumbing ---------------------------------------------------------------------
 
 impl CompositorHandler for App {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, factor: i32) {
+    fn scale_factor_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        factor: i32,
+    ) {
         if let Some(i) = self.surface_index(surface) {
             if self.surfaces[i].scale != factor {
                 self.surfaces[i].scale = factor;
@@ -433,10 +491,31 @@ impl CompositorHandler for App {
             }
         }
     }
-    fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
+    fn transform_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: wl_output::Transform,
+    ) {
+    }
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
-    fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn surface_enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
+    fn surface_leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
 }
 
 impl OutputHandler for App {
@@ -495,7 +574,14 @@ impl SeatHandler for App {
 }
 
 impl Dispatch<wl_keyboard::WlKeyboard, ()> for App {
-    fn event(app: &mut Self, _: &wl_keyboard::WlKeyboard, event: wl_keyboard::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        app: &mut Self,
+        _: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         match event {
             wl_keyboard::Event::Enter { .. } => log::trace!("keyboard enter"),
             wl_keyboard::Event::Keymap { format: WEnum::Value(wl_keyboard::KeymapFormat::XkbV1), fd, size } => {
@@ -527,10 +613,13 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for App {
                 app.act(action.clone());
                 if let (true, Some((rate, delay))) = (repeats, app.kb.repeat) {
                     let every = Duration::from_micros(1_000_000 / rate.max(1) as u64);
-                    let tok = app.handle.insert_source(Timer::from_duration(Duration::from_millis(delay as u64)), move |_, _, app: &mut App| {
-                        app.act(action.clone());
-                        TimeoutAction::ToDuration(every)
-                    });
+                    let tok = app.handle.insert_source(
+                        Timer::from_duration(Duration::from_millis(delay as u64)),
+                        move |_, _, app: &mut App| {
+                            app.act(action.clone());
+                            TimeoutAction::ToDuration(every)
+                        },
+                    );
                     if let Ok(t) = tok {
                         app.repeat = Some((key, t));
                     }
@@ -542,8 +631,15 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for App {
 }
 
 impl PointerHandler for App {
-    fn pointer_frame(&mut self, conn: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
+    fn pointer_frame(
+        &mut self,
+        conn: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
         for ev in events {
+            log::trace!("pointer {:?} on {:?} at {:?}", ev.kind, ev.surface.id(), ev.position);
             match ev.kind {
                 PointerEventKind::Enter { .. } => {
                     if let Some(p) = &self.pointer {
@@ -552,7 +648,9 @@ impl PointerHandler for App {
                     self.pointer_on(&ev.surface);
                 }
                 PointerEventKind::Motion { .. } => self.pointer_on(&ev.surface),
-                PointerEventKind::Press { button: BTN_LEFT, .. } => self.click(&ev.surface, ev.position.0, ev.position.1),
+                PointerEventKind::Press { button: BTN_LEFT, .. } => {
+                    self.click(&ev.surface, ev.position.0, ev.position.1)
+                }
                 _ => {}
             }
         }
@@ -565,20 +663,20 @@ impl App {
         if self.surface_index(surface).is_none() {
             return;
         }
-        let id = surface.id();
-        if self.card_surface.as_ref() != Some(&id) {
-            let old = self.card_index();
-            self.card_surface = Some(id);
-            if let Some(o) = old {
-                self.surfaces[o].dirty = true;
-            }
-            self.redraw_card();
-        }
+        // flush() notices the move and repaints both outputs.
+        self.card_surface = Some(surface.id());
     }
 }
 
 impl Dispatch<wl_buffer::WlBuffer, Arc<AtomicBool>> for App {
-    fn event(_: &mut Self, _: &wl_buffer::WlBuffer, event: wl_buffer::Event, busy: &Arc<AtomicBool>, _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        _: &mut Self,
+        _: &wl_buffer::WlBuffer,
+        event: wl_buffer::Event,
+        busy: &Arc<AtomicBool>,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         if let wl_buffer::Event::Release = event {
             busy.store(false, Ordering::Release);
         }
@@ -589,7 +687,14 @@ impl LayerShellHandler for App {
     fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
         self.surfaces.retain(|s| s.wl_surface() != layer.wl_surface());
     }
-    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface, c: LayerSurfaceConfigure, _: u32) {
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        layer: &LayerSurface,
+        c: LayerSurfaceConfigure,
+        _: u32,
+    ) {
         self.configure_surface(&layer.wl_surface().clone(), c.new_size.0, c.new_size.1);
     }
 }
@@ -612,7 +717,14 @@ impl SessionLockHandler for App {
     fn finished(&mut self, _: &Connection, _: &QueueHandle<Self>, lock: SessionLock) {
         crate::lock::finished(self, lock);
     }
-    fn configure(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: SessionLockSurface, c: SessionLockSurfaceConfigure, _: u32) {
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        surface: SessionLockSurface,
+        c: SessionLockSurfaceConfigure,
+        _: u32,
+    ) {
         self.configure_surface(&surface.wl_surface().clone(), c.new_size.0, c.new_size.1);
     }
 }

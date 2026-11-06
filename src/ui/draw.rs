@@ -97,7 +97,16 @@ pub struct Look {
 
 impl Scene {
     #[allow(clippy::too_many_arguments)]
-    pub fn build(wall: &Wallpaper, w: u32, h: u32, scale: f32, geom: &Geometry, look: &Look, hints: Option<&str>, painter: &mut Painter) -> Self {
+    pub fn build(
+        wall: &Wallpaper,
+        w: u32,
+        h: u32,
+        scale: f32,
+        geom: &Geometry,
+        look: &Look,
+        hints: Option<&str>,
+        painter: &mut Painter,
+    ) -> Self {
         let mut bg = wall.fill(w, h);
         if let Some(hints) = hints {
             let st = Style::new(13.0 * scale, SOFT);
@@ -312,7 +321,12 @@ fn fill(pm: &mut Pixmap, path: Option<tiny_skia::Path>, c: [f32; 4], t: Transfor
 
 fn stroke(pm: &mut Pixmap, path: Option<tiny_skia::Path>, c: [f32; 4], width: f32, t: Transform) {
     if let Some(path) = path {
-        let st = Stroke { width, line_cap: tiny_skia::LineCap::Round, line_join: tiny_skia::LineJoin::Round, ..Default::default() };
+        let st = Stroke {
+            width,
+            line_cap: tiny_skia::LineCap::Round,
+            line_join: tiny_skia::LineJoin::Round,
+            ..Default::default()
+        };
         pm.stroke_path(&path, &paint(c), &st, t, None);
     }
 }

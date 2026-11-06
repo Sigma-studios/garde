@@ -42,7 +42,8 @@ fn parse_args() -> Result<(Cmd, PathBuf), String> {
     let mut args = std::env::args().skip(1);
     let mut cmd = None;
     let mut daemon = false;
-    let mut config = std::env::var_os("GARDE_CONFIG").map(PathBuf::from).unwrap_or_else(|| config::DEFAULT_CONFIG.into());
+    let mut config =
+        std::env::var_os("GARDE_CONFIG").map(PathBuf::from).unwrap_or_else(|| config::DEFAULT_CONFIG.into());
     while let Some(a) = args.next() {
         match a.as_str() {
             "login" if cmd.is_none() => cmd = Some("login"),

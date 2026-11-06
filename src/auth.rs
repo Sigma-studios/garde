@@ -60,7 +60,12 @@ impl<F: FnMut(Message)> ConversationHandler for Conv<F> {
 
 /// Check `password` for `user` with PAM `service`. `Err` carries the text to show: PAM's own
 /// messages when it sent some (e.g. faillock's "account locked"), else a plain description.
-pub fn check(service: &str, user: &str, password: Zeroizing<String>, on_message: impl FnMut(Message)) -> Result<(), String> {
+pub fn check(
+    service: &str,
+    user: &str,
+    password: Zeroizing<String>,
+    on_message: impl FnMut(Message),
+) -> Result<(), String> {
     let conv = Conv { password: Some(password), on_message, msgs: Default::default() };
     let mut ctx = pam_client::Context::new(service, Some(user), conv).map_err(|e| format!("PAM: {e}"))?;
     let res = ctx.authenticate(Flag::NONE).and_then(|()| match ctx.acct_mgmt(Flag::NONE) {

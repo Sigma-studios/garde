@@ -160,7 +160,8 @@ impl Geometry {
         let field = Rect { x: PAD, y, w: inner, h: FIELD_H };
         let pill_h = 28.0;
         let pill_w = 44.0;
-        let layout_pill = Rect { x: field.x + field.w - pill_w - 9.0, y: field.y + (FIELD_H - pill_h) / 2.0, w: pill_w, h: pill_h };
+        let layout_pill =
+            Rect { x: field.x + field.w - pill_w - 9.0, y: field.y + (FIELD_H - pill_h) / 2.0, w: pill_w, h: pill_h };
         y += FIELD_H + 12.0;
         let caps = Rect { x: PAD, y, w: inner, h: LINE };
         y += LINE + 2.0;
@@ -177,7 +178,17 @@ impl Geometry {
             (None, Rect::default(), Rect::default())
         };
         y += PAD - 6.0;
-        Self { card: Rect { x: 0.0, y: 0.0, w: CARD_W, h: y }, name, field, layout_pill, caps, status, session, prev, next }
+        Self {
+            card: Rect { x: 0.0, y: 0.0, w: CARD_W, h: y },
+            name,
+            field,
+            layout_pill,
+            caps,
+            status,
+            session,
+            prev,
+            next,
+        }
     }
 
     /// Top-left of the card centered on a `w`×`h` (logical) output, slightly above the middle.

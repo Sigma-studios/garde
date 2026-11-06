@@ -218,15 +218,13 @@ mod tests {
         assert_eq!(s.desktop_names, ["COSMIC"]);
         let (cmd, env) = s.launch(&[]);
         assert_eq!(cmd, s.exec);
-        assert_eq!(
-            env,
-            ["XDG_SESSION_TYPE=wayland", "XDG_SESSION_DESKTOP=cosmic", "XDG_CURRENT_DESKTOP=COSMIC"]
-        );
+        assert_eq!(env, ["XDG_SESSION_TYPE=wayland", "XDG_SESSION_DESKTOP=cosmic", "XDG_CURRENT_DESKTOP=COSMIC"]);
     }
 
     #[test]
     fn plasma_desktop_names_and_x11_wrapper() {
-        let text = "[Desktop Entry]\nType=XSession\nExec=startplasma-x11\nName=Plasma (X11)\nDesktopNames=KDE;Plasma;\n";
+        let text =
+            "[Desktop Entry]\nType=XSession\nExec=startplasma-x11\nName=Plasma (X11)\nDesktopNames=KDE;Plasma;\n";
         assert!(parse_desktop("plasmax11", &text.replace("XSession", "Link"), Kind::X11).is_none());
         let s = parse_desktop("plasmax11", text, Kind::X11).unwrap();
         let (cmd, env) = s.launch(&["startx".into(), "/usr/bin/env".into()]);

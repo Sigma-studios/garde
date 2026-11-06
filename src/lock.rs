@@ -80,7 +80,8 @@ pub fn init(app: &mut App) -> Result<(), String> {
         Ok(l) => {
             let l = Arc::new(l);
             let id = l.session.as_str().rsplit('/').next().unwrap_or("session").to_string();
-            this(app).marker = std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join(format!("garde-{id}.locked")));
+            this(app).marker =
+                std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join(format!("garde-{id}.locked")));
             this(app).logind = Some(l);
         }
         Err(e) if daemon => return Err(format!("logind: {e}")),

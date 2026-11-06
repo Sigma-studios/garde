@@ -36,10 +36,7 @@ pub fn current_login() -> Option<String> {
 
 fn passwd_field(login: &str, field: impl Fn(&libc::passwd) -> *mut libc::c_char) -> Option<String> {
     let name = CString::new(login).ok()?;
-    with_passwd(
-        |buf, pw, out| unsafe { libc::getpwnam_r(name.as_ptr(), pw, buf.as_mut_ptr(), buf.len(), out) },
-        field,
-    )
+    with_passwd(|buf, pw, out| unsafe { libc::getpwnam_r(name.as_ptr(), pw, buf.as_mut_ptr(), buf.len(), out) }, field)
 }
 
 fn with_passwd(

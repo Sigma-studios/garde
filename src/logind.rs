@@ -39,6 +39,7 @@ pub enum Signal {
 pub struct Logind {
     conn: Connection,
     pub session: OwnedObjectPath,
+    inhibit_warned: std::sync::atomic::AtomicBool,
 }
 
 impl Logind {
@@ -46,7 +47,7 @@ impl Logind {
         let conn = Connection::system()?;
         let session = find_session(&conn)?;
         log::info!("watching logind session {}", session.as_str());
-        Ok(Self { conn, session })
+        Ok(Self { conn, session, inhibit_warned: Default::default() })
     }
 
     /// Delay inhibitor so the screen is locked before the system sleeps. Dropping the fd releases it.
@@ -61,24 +62,25 @@ impl Logind {
         match r.and_then(|m| m.body().deserialize::<OwnedFd>()) {
             Ok(fd) => Some(fd),
             Err(e) => {
-                log::warn!("no sleep inhibitor: {e}");
+                if !self.inhibit_warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log::warn!("no sleep inhibitor (the screen may lock only after resume): {e}");
+                }
                 None
             }
         }
     }
 
     pub fn set_locked_hint(&self, locked: bool) {
-        if let Err(e) = self.conn.call_method(Some(DEST), self.session.as_str(), Some(SESSION), "SetLockedHint", &(locked,)) {
+        if let Err(e) =
+            self.conn.call_method(Some(DEST), self.session.as_str(), Some(SESSION), "SetLockedHint", &(locked,))
+        {
             log::warn!("SetLockedHint({locked}): {e}");
         }
     }
 
     /// Block forever, calling `f` for each signal of interest. Returns on D-Bus errors.
     pub fn listen(&self, mut f: impl FnMut(Signal)) -> zbus::Result<()> {
-        let rule = zbus::MatchRule::builder()
-            .msg_type(zbus::message::Type::Signal)
-            .sender(DEST)?
-            .build();
+        let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(DEST)?.build();
         let it = MessageIterator::for_match_rule(rule, &self.conn, Some(64))?;
         for msg in it {
             let msg = msg?;

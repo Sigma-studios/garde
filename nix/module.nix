@@ -82,10 +82,18 @@ in
           };
           sessions.dirs = lib.mkOption {
             type = lib.types.listOf lib.types.str;
-            default = [
-              "/run/current-system/sw/share/wayland-sessions"
-              "/run/current-system/sw/share/xsessions"
+            # NixOS gathers the sessions of every enabled desktop here, not in the system
+            # profile: Plasma's isn't under /run/current-system/sw.
+            default = let d = config.services.displayManager.sessionData.desktops; in [
+              "${d}/share/wayland-sessions"
+              "${d}/share/xsessions"
             ];
+            defaultText = lib.literalExpression ''
+              [
+                "''${config.services.displayManager.sessionData.desktops}/share/wayland-sessions"
+                "''${config.services.displayManager.sessionData.desktops}/share/xsessions"
+              ]
+            '';
             description = "Where the login screen looks for session .desktop files.";
           };
         };

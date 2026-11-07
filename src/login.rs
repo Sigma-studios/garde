@@ -18,7 +18,6 @@ use crate::sessions::{self, Session};
 use crate::ui::Tone;
 
 const CONFIRM_FOR: Duration = Duration::from_secs(6);
-pub const HINTS: &str = "F1  Shut down        F2  Reboot";
 
 pub struct Login {
     sessions: Vec<Session>,
@@ -46,7 +45,7 @@ fn this(app: &mut App) -> &mut Login {
 
 /// Start the greetd worker and fill in the login-only parts of the card.
 pub fn init(app: &mut App) -> Result<(), String> {
-    app.ui.hints = Some(HINTS.into());
+    app.ui.power_buttons = true;
     refresh_session(app);
     if this(app).sessions.is_empty() {
         app.ui.set_status(Tone::Error, "No session found");
@@ -167,12 +166,12 @@ pub fn key(app: &mut App, action: &Action) {
         }
         (Some(p), _) => {
             this(app).power = Some((p, Instant::now()));
-            let (k, what) = if p == Power::PowerOff { ("F1", "shut down") } else { ("F2", "reboot") };
-            app.ui.set_status(Tone::Info, format!("Press {k} again to {what}"));
+            let what = if p == Power::PowerOff { "shut down" } else { "reboot" };
+            app.ui.set_status(Tone::Info, format!("Press again to {what}"));
         }
         (None, Some(_)) => {
             // Any other key cancels the confirmation.
-            if app.ui.status.as_ref().is_some_and(|s| s.text.starts_with("Press F")) {
+            if app.ui.status.as_ref().is_some_and(|s| s.text.starts_with("Press again")) {
                 app.ui.status = None;
             }
         }

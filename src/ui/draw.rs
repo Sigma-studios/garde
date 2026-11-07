@@ -7,13 +7,12 @@ use image::RgbaImage;
 use tiny_skia::{FillRule, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, Transform};
 
 use super::text::{Align, Painter, Style};
-use super::{Geometry, Rect, Tone, Ui};
+use super::{smooth, Corner, Geometry, Rect, Tone, Ui};
+use crate::logind::Power;
 
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const SOFT: [f32; 4] = [1.0, 1.0, 1.0, 0.86];
 const FAINT: [f32; 4] = [1.0, 1.0, 1.0, 0.5];
-const ERROR: [f32; 4] = [1.0, 0.56, 0.52, 1.0];
-const WARN: [f32; 4] = [1.0, 0.83, 0.45, 1.0];
 
 pub struct Wallpaper(Option<RgbaImage>);
 
@@ -88,6 +87,11 @@ pub struct Scene {
     bg: Pixmap,
     pub card: IRect,
     card_bg: Pixmap,
+    /// The bottom-left controls (session picker, layout), in logical and buffer px.
+    pub corner: Corner,
+    pub corner_px: IRect,
+    /// The bottom-right power buttons (login screen), in buffer px.
+    pub power_px: Option<IRect>,
 }
 
 pub struct Look {
@@ -97,35 +101,20 @@ pub struct Look {
 
 impl Scene {
     #[allow(clippy::too_many_arguments)]
-    pub fn build(
-        wall: &Wallpaper,
-        w: u32,
-        h: u32,
-        scale: f32,
-        geom: &Geometry,
-        look: &Look,
-        hints: Option<&str>,
-        painter: &mut Painter,
-    ) -> Self {
-        let mut bg = wall.fill(w, h);
-        if let Some(hints) = hints {
-            let st = Style::new(13.0 * scale, SOFT);
-            let y = h as f32 - 44.0 * scale;
-            let shadow = Style { color: [0.0, 0.0, 0.0, 0.55], ..st };
-            painter.draw(&mut bg, hints, &shadow, 0.0, y + scale, w as f32);
-            painter.draw(&mut bg, hints, &st, 0.0, y, w as f32);
-        }
-        let (ox, oy) = geom.origin(w as f32 / scale, h as f32 / scale);
-        let cw = ((geom.card.w * scale).round() as u32).min(w);
-        let chh = ((geom.card.h * scale).round() as u32).min(h);
-        let card = IRect {
-            x: ((ox * scale).round() as u32).min(w - cw),
-            y: ((oy * scale).round() as u32).min(h - chh),
-            w: cw.max(1),
-            h: chh.max(1),
-        };
+    pub fn build(wall: &Wallpaper, w: u32, h: u32, scale: f32, geom: &Geometry, look: &Look, login: bool) -> Self {
+        let bg = wall.fill(w, h);
+        let card = card_rect(geom, w, h, scale);
         let card_bg = frosted(&bg, card, look, geom, scale);
-        Self { width: w, height: h, scale, bg_xrgb: to_xrgb(&bg), bg, card, card_bg }
+        let corner = Corner::new(login, h as f32 / scale);
+        let corner_px = to_px(corner.area, w, h, scale);
+        let power_px = login.then(|| to_px(Corner::power_area(w as f32 / scale, h as f32 / scale), w, h, scale));
+        Self { width: w, height: h, scale, bg_xrgb: to_xrgb(&bg), bg, card, card_bg, corner, corner_px, power_px }
+    }
+
+    /// The card changed size: place it again and redo its backdrop. The background stays.
+    pub fn relayout(&mut self, geom: &Geometry, look: &Look) {
+        self.card = card_rect(geom, self.width, self.height, self.scale);
+        self.card_bg = frosted(&self.bg, self.card, look, geom, self.scale);
     }
 
     /// The wallpaper under the card, for outputs that don't show it.
@@ -133,10 +122,125 @@ impl Scene {
         crop(&self.bg, self.card)
     }
 
-    pub fn render_card(&self, geom: &Geometry, ui: &Ui, painter: &mut Painter) -> Pixmap {
-        let mut pm = self.card_bg.clone();
-        draw_form(&mut pm, geom, ui, painter, self.scale);
+    /// The bottom-left corner: bare wallpaper, or with the controls `drop` px below their place
+    /// on the output showing the card.
+    pub fn render_corner(&self, ui: Option<&Ui>, drop: f32, painter: &mut Painter) -> Pixmap {
+        let mut pm = crop(&self.bg, self.corner_px);
+        if let Some(ui) = ui {
+            let (ox, oy) = (self.corner_px.x as f32 / self.scale, self.corner_px.y as f32 / self.scale - drop);
+            draw_corner(&mut pm, &self.corner, ox, oy, ui, painter, self.scale);
+        }
         pm
+    }
+
+    /// The power buttons' corner, like `render_corner`.
+    pub fn render_power(&self, show: bool, drop: f32) -> Option<(IRect, Pixmap)> {
+        let r = self.power_px?;
+        let mut pm = crop(&self.bg, r);
+        if show {
+            let (ox, oy) = (r.x as f32 / self.scale, r.y as f32 / self.scale - drop);
+            let t = Transform::from_scale(self.scale, self.scale).pre_translate(-ox, -oy);
+            let (w, h) = (self.width as f32 / self.scale, self.height as f32 / self.scale);
+            for (p, b) in Geometry::power_buttons(w, h) {
+                power_button(&mut pm, p, b, t);
+            }
+        }
+        Some((r, pm))
+    }
+
+    /// The card at point `reveal` of the transition: the clock fades out drifting up, the name
+    /// and field fade in rising into place. Messages stay put.
+    pub fn render_card(&self, geom: &Geometry, ui: &Ui, reveal: f32, painter: &mut Painter) -> Pixmap {
+        let mut pm = self.card_bg.clone();
+        let s = self.scale;
+        let form = smooth((reveal - 0.1) / 0.75);
+        let clock = 1.0 - smooth(reveal / 0.6);
+        let layer = |pm: &mut Pixmap, alpha: f32, dy: f32, draw: &mut dyn FnMut(&mut Pixmap)| {
+            if alpha <= 0.0 {
+                return;
+            }
+            if alpha >= 1.0 && dy == 0.0 {
+                return draw(pm);
+            }
+            let Some(mut l) = Pixmap::new(pm.width(), pm.height()) else { return };
+            draw(&mut l);
+            let paint = PixmapPaint { opacity: alpha, ..Default::default() };
+            pm.draw_pixmap(0, (dy * s).round() as i32, l.as_ref(), &paint, Transform::identity(), None);
+        };
+        layer(&mut pm, clock, -14.0 * (1.0 - clock), &mut |l| draw_clock(l, geom, ui, painter, s));
+        layer(&mut pm, form, 14.0 * (1.0 - form), &mut |l| draw_form(l, geom, ui, painter, s));
+        draw_status(&mut pm, geom, ui, painter, s);
+        pm
+    }
+}
+
+/// A logical rect in buffer px, inside a `w`×`h` buffer.
+fn to_px(r: Rect, w: u32, h: u32, scale: f32) -> IRect {
+    let px = |v: f32| (v * scale).round().max(0.0) as u32;
+    let (x, y) = (px(r.x).min(w - 1), px(r.y).min(h - 1));
+    IRect { x, y, w: px(r.w).clamp(1, w - x), h: px(r.h).clamp(1, h - y) }
+}
+
+/// The card's rect in buffer px on a `w`×`h` buffer.
+fn card_rect(geom: &Geometry, w: u32, h: u32, scale: f32) -> IRect {
+    let (ox, oy) = geom.origin(w as f32 / scale, h as f32 / scale);
+    let cw = ((geom.card.w * scale).round() as u32).clamp(1, w);
+    let ch = ((geom.card.h * scale).round() as u32).clamp(1, h);
+    IRect { x: ((ox * scale).round() as u32).min(w - cw), y: ((oy * scale).round() as u32).min(h - ch), w: cw, h: ch }
+}
+
+/// A round glassy button with a shut-down or reboot icon, drawn into the background.
+fn power_button(pm: &mut Pixmap, p: Power, r: Rect, t: Transform) {
+    let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+    if let Some(c) = PathBuilder::from_circle(cx, cy, r.w / 2.0) {
+        pm.fill_path(&c, &paint([0.0, 0.0, 0.0, 0.28]), FillRule::Winding, t, None);
+    }
+    if let Some(c) = PathBuilder::from_circle(cx, cy, r.w / 2.0 - 0.5) {
+        pm.stroke_path(&c, &paint([1.0, 1.0, 1.0, 0.18]), &Stroke { width: 1.0, ..Default::default() }, t, None);
+    }
+    let rad = 8.0;
+    let color = [1.0, 1.0, 1.0, 0.9];
+    let mut pb = PathBuilder::new();
+    match p {
+        Power::PowerOff => {
+            // An arc open at the top, and the bar through the gap.
+            arc(&mut pb, cx, cy, rad, -60.0, 300.0);
+            stroke(pm, pb.finish(), color, 2.0, t);
+            let mut bar = PathBuilder::new();
+            bar.move_to(cx, cy - rad - 2.0);
+            bar.line_to(cx, cy - 1.0);
+            stroke(pm, bar.finish(), color, 2.0, t);
+        }
+        Power::Reboot => {
+            // An almost closed circle, with an arrow head where it ends.
+            arc(&mut pb, cx, cy, rad, -40.0, 280.0);
+            stroke(pm, pb.finish(), color, 2.0, t);
+            // Arrow head at the arc's start, pointing back along it (anticlockwise).
+            let a = (-40.0f32).to_radians();
+            let (px, py) = (cx + rad * a.cos(), cy + rad * a.sin());
+            let (dx, dy) = (a.sin(), -a.cos());
+            let (nx, ny) = (a.cos(), a.sin());
+            let mut head = PathBuilder::new();
+            head.move_to(px + dx * 4.0, py + dy * 4.0);
+            head.line_to(px - dx * 2.0 + nx * 4.0, py - dy * 2.0 + ny * 4.0);
+            head.line_to(px - dx * 2.0 - nx * 4.0, py - dy * 2.0 - ny * 4.0);
+            head.close();
+            fill(pm, head.finish(), color, t);
+        }
+    }
+}
+
+/// Clockwise arc from `start` degrees (0 = right, 90 = down) through `sweep` degrees, as lines.
+fn arc(pb: &mut PathBuilder, cx: f32, cy: f32, r: f32, start: f32, sweep: f32) {
+    let steps = (sweep.abs() / 6.0).ceil() as usize;
+    for i in 0..=steps {
+        let a = (start + sweep * i as f32 / steps as f32).to_radians();
+        let (x, y) = (cx + r * a.cos(), cy + r * a.sin());
+        if i == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
     }
 }
 
@@ -233,9 +337,8 @@ fn draw_form(pm: &mut Pixmap, g: &Geometry, ui: &Ui, p: &mut Painter, s: f32) {
     let border = if ui.busy { 0.22 } else { 0.55 };
     stroke(pm, rrect(inset(f, 0.75), 11.25), [1.0, 1.0, 1.0, border], 1.5, t);
 
-    let show_pill = ui.layouts_available || !ui.layout.is_empty();
     let text_x = f.x + 16.0;
-    let text_end = if show_pill { g.layout_pill.x - 8.0 } else { f.x + f.w - 16.0 };
+    let text_end = f.x + f.w - 16.0;
     let mid = f.y + f.h / 2.0;
     let mut caret_x = text_x;
     let content = Style { align: Align::Left, ..Style::new(15.0 * s, WHITE) };
@@ -265,35 +368,58 @@ fn draw_form(pm: &mut Pixmap, g: &Geometry, ui: &Ui, p: &mut Painter, s: f32) {
         fill(pm, rect_path(Rect { x: caret_x, y: mid - 11.0, w: 2.0, h: 22.0 }), WHITE, t);
     }
 
-    if show_pill {
-        fill(pm, rrect(g.layout_pill, 8.0), [1.0, 1.0, 1.0, if ui.layouts_available { 0.18 } else { 0.08 }], t);
-        let st = Style { bold: true, ..Style::new(12.5 * s, SOFT) };
-        let lp = g.layout_pill;
-        p.draw(pm, &ui.layout, &st, lp.x * s, (lp.y + 5.0) * s, lp.w * s);
-    }
-
-    if ui.caps {
-        let st = Style::new(super::SMALL * s, WARN);
+    if ui.caps && g.caps.h > 0.0 {
+        let st = Style::new(super::SMALL * s, SOFT);
         p.draw(pm, "Caps Lock is on", &st, g.caps.x * s, g.caps.y * s, g.caps.w * s);
     }
+}
 
+/// The status message, under the field or the clock.
+fn draw_status(pm: &mut Pixmap, g: &Geometry, ui: &Ui, p: &mut Painter, s: f32) {
     if let Some(status) = &ui.status {
         let color = match status.tone {
-            Tone::Error => ERROR,
+            Tone::Error => WHITE,
             Tone::Info => SOFT,
             Tone::Busy => FAINT,
         };
-        let st = Style { max_lines: super::STATUS_LINES, ..Style::new(super::SMALL * s, color) };
+        let st = Style { max_lines: g.status_lines.max(1), ..Style::new(super::SMALL * s, color) };
         p.draw(pm, &status.text, &st, g.status.x * s, g.status.y * s, g.status.w * s);
     }
+}
 
-    if let (Some(r), Some((name, arrows))) = (g.session, &ui.session) {
-        let st = Style::new(15.0 * s, SOFT);
-        p.draw(pm, name, &st, (r.x + 40.0) * s, (r.y + 7.0) * s, (r.w - 80.0) * s);
+/// The clock view: the time, large, and the date under it.
+fn draw_clock(pm: &mut Pixmap, g: &Geometry, ui: &Ui, p: &mut Painter, s: f32) {
+    let time = Style { bold: true, ..Style::new(super::TIME_SIZE * s, WHITE) };
+    p.draw(pm, &ui.clock.0, &time, g.time.x * s, g.time.y * s, g.time.w * s);
+    let date = Style::new(15.0 * s, SOFT);
+    p.draw(pm, &ui.clock.1, &date, g.date.x * s, g.date.y * s, g.date.w * s);
+}
+
+/// Session picker and layout pill, as glassy pills like the power buttons. (ox, oy): the
+/// pixmap's origin in logical output px.
+fn draw_corner(pm: &mut Pixmap, c: &Corner, ox: f32, oy: f32, ui: &Ui, p: &mut Painter, s: f32) {
+    let t = Transform::from_scale(s, s).pre_translate(-ox, -oy);
+    let at = |r: Rect| Rect { x: r.x - ox, y: r.y - oy, ..r };
+    let glass = |pm: &mut Pixmap, r: Rect| {
+        fill(pm, rrect(r, r.h / 2.0), [0.0, 0.0, 0.0, 0.28], t);
+        stroke(pm, rrect(inset(r, 0.5), r.h / 2.0 - 0.5), [1.0, 1.0, 1.0, 0.18], 1.0, t);
+    };
+    if let (Some(r), Some((name, arrows))) = (c.session, &ui.session) {
+        glass(pm, r);
+        let st = Style::new(14.0 * s, SOFT);
+        let r0 = at(r);
+        let inset_x = if *arrows { c.prev.w } else { 14.0 };
+        p.draw(pm, name, &st, (r0.x + inset_x) * s, (r0.y + 11.0) * s, (r0.w - 2.0 * inset_x) * s);
         if *arrows {
-            chevron(pm, g.prev, -1.0, t);
-            chevron(pm, g.next, 1.0, t);
+            chevron(pm, c.prev, -1.0, t);
+            chevron(pm, c.next, 1.0, t);
         }
+    }
+    if ui.layouts_available || !ui.layout.is_empty() {
+        glass(pm, c.layout);
+        let st = Style { bold: true, ..Style::new(13.0 * s, if ui.layouts_available { SOFT } else { FAINT }) };
+        let l = at(c.layout);
+        p.draw(pm, &ui.layout, &st, l.x * s, (l.y + 11.5) * s, l.w * s);
     }
 }
 

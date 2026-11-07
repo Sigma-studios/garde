@@ -5,7 +5,7 @@ password field, a caps-lock warning and the keyboard layout. There is no usernam
 is fixed in the config.
 
 - `garde login`: a [greetd](https://sr.ht/~kennylevinsen/greetd/) greeter, run under
-  [cage](https://github.com/cage-kiosk/cage). Adds a session picker and F1/F2 power keys.
+  [cage](https://github.com/cage-kiosk/cage). Adds a session picker and shut down/reboot buttons (or F1/F2).
 - `garde lock`: a Wayland lock screen on `ext-session-lock-v1`. `garde lock --daemon` locks on
   logind's `Lock` signal (`loginctl lock-session`, which COSMIC's idle timer, Super+Escape and
   Génie's Lock all use) and before sleep.
@@ -55,7 +55,10 @@ The name shown is the GECOS full name, falling back to the login name. Unknown k
   the card, which gives it a frosted-glass look. A missing wallpaper falls back to a dark
   gradient; it never stops the locker.
 - **Card**: drawn on the output under the pointer, else the top-left output. Other outputs show
-  only the wallpaper.
+  only the wallpaper. It holds the name and password field, and makes room for the caps-lock
+  warning and messages only while they're shown, growing downwards, so the name and field never
+  move. The session picker (login) and the layout pill sit in the bottom-left corner of that
+  output.
 - **Keyboard**: uses the compositor's keymap. Under cage, the Nix module sets
   `XKB_DEFAULT_LAYOUT` from `layouts`. garde always starts on the first layout. Super+Alt+K or a
   click on the layout pill cycles it locally, and a layout switch made by the compositor still wins.
@@ -71,12 +74,13 @@ The name shown is the GECOS full name, falling back to the login name. Unknown k
   due to 3 failed logins. (10 minutes left to unlock)" is sent as info.
 - **Login**: sessions come from `.desktop` files (`Name`, `Exec`, `DesktopNames`); `Hidden`,
   `NoDisplay` and failed `TryExec` entries are skipped. Pick with Left/Right or by clicking the
-  arrows. The picker defaults to the last session started, which is saved in the state file.
+  arrows (or the name, for the next one). The picker defaults to the last session started, which is saved in the state file.
   StartSession passes `XDG_SESSION_TYPE`, `XDG_SESSION_DESKTOP` (the file's id) and
   `XDG_CURRENT_DESKTOP`. On failure garde shows the error, sends CancelSession, opens a new session
   for the same user and clears the field; it never exits on a wrong password. If an attempt fails
   without asking anything (a lock-out stack with `requisite`), garde waits for the next Enter
-  instead of retrying in a loop. F1 and F2 ask for the same key again within 6 s, then call
+  instead of retrying in a loop. The shut down and reboot buttons in the
+  bottom-right corner, or F1 and F2, ask for the same button or key again within 6 s, then call
   logind's PowerOff/Reboot.
 - **Lock**: one lock surface per output, including outputs plugged in while locked. PAM runs on a
   worker thread with the status "Checking…". The only call to `unlock_and_destroy` follows a

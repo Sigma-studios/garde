@@ -4,7 +4,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -45,11 +45,15 @@ use wayland_client::{
 use crate::config::Config;
 use crate::keyboard::{layout_label, Action, Keyboard};
 use crate::ui::draw::{blit, Look, Scene, Wallpaper};
-use crate::ui::text::Painter;
-use crate::ui::{Geometry, Hit, Ui};
+use crate::ui::text::{Painter, Style};
+use crate::ui::{Corner, Geometry, Hit, Ui};
 
 const BTN_LEFT: u32 = 0x110;
 const BLINK: Duration = Duration::from_millis(530);
+/// Back to the clock after this long without input, with nothing typed.
+const IDLE: Duration = Duration::from_secs(30);
+/// Transition frame interval: about 144 Hz.
+const FRAME: Duration = Duration::from_millis(7);
 
 pub enum SurfKind {
     Lock(SessionLockSurface),
@@ -130,6 +134,11 @@ pub struct App {
     drawn_card: Option<wayland_client::backend::ObjectId>,
     repeat: Option<(u32, RegistrationToken)>,
     blink: Option<RegistrationToken>,
+    /// Once a second while shown: the clock, and the idle return to it.
+    tick: Option<RegistrationToken>,
+    /// Frames while the clock/input transition runs.
+    anim: Option<RegistrationToken>,
+    last_input: Instant,
 
     pub mode: ModeState,
     pub exit_code: Option<i32>,
@@ -176,7 +185,7 @@ impl App {
             kb: Keyboard::new(cfg.numlock),
             cfg,
             ui,
-            geom: Geometry::new(login),
+            geom: Geometry::new(false, 0),
             look,
             painter,
             wallpaper,
@@ -187,6 +196,9 @@ impl App {
             drawn_card: None,
             repeat: None,
             blink: None,
+            tick: None,
+            anim: None,
+            last_input: Instant::now(),
             mode,
             exit_code: None,
         })
@@ -229,6 +241,7 @@ impl App {
     /// Draw every dirty surface. Called once per event-loop iteration, so bursts of events
     /// produce a single frame.
     pub fn flush(&mut self) {
+        self.sync_geometry();
         let card = self.card_index();
         let card_id = card.map(|i| self.surfaces[i].wl_surface().id());
         if card_id != self.drawn_card {
@@ -251,6 +264,29 @@ impl App {
         let _ = self.conn.flush();
     }
 
+    /// Fit the card to what it shows (caps-lock warning, status lines). When its size changes,
+    /// every output is repainted in full: the old card may have covered more of it.
+    fn sync_geometry(&mut self) {
+        let lines = self.ui.status.as_ref().map_or(0, |st| {
+            let style = Style { max_lines: crate::ui::STATUS_LINES, ..Style::new(crate::ui::SMALL, [1.0; 4]) };
+            self.painter.line_count(&st.text, &style, self.geom.status.w)
+        });
+        let geom = Geometry::new(self.ui.caps && self.ui.reveal.input(), lines);
+        if geom == self.geom {
+            return;
+        }
+        self.geom = geom;
+        for s in &mut self.surfaces {
+            if let Some(scene) = &mut s.scene {
+                scene.relayout(&self.geom, &self.look);
+            }
+            for b in &mut s.bufs {
+                b.bg_valid = false;
+            }
+            s.dirty = true;
+        }
+    }
+
     fn draw(&mut self, i: usize, with_card: bool) {
         let s = &mut self.surfaces[i];
         let scale = s.scale.max(1);
@@ -259,18 +295,9 @@ impl App {
             return;
         }
         if s.scene.as_ref().is_none_or(|sc| (sc.width, sc.height, sc.scale) != (w, h, scale as f32)) {
-            let hints = matches!(self.mode, ModeState::Login(_)).then(|| self.ui.hints.clone()).flatten();
             let t = std::time::Instant::now();
-            s.scene = Some(Scene::build(
-                &self.wallpaper,
-                w,
-                h,
-                scale as f32,
-                &self.geom,
-                &self.look,
-                hints.as_deref(),
-                &mut self.painter,
-            ));
+            s.scene =
+                Some(Scene::build(&self.wallpaper, w, h, scale as f32, &self.geom, &self.look, self.ui.power_buttons));
             log::debug!("scene {w}x{h}@{scale} built in {:?}", t.elapsed());
             s.bufs.retain(|b| b.size == (w, h));
         }
@@ -311,10 +338,24 @@ impl App {
             canvas.copy_from_slice(&scene.bg_xrgb);
             buf.bg_valid = true;
         }
-        let pm =
-            if with_card { scene.render_card(&self.geom, &self.ui, &mut self.painter) } else { scene.plain_card() };
+        let reveal = self.ui.reveal.value(Instant::now());
+        let pm = if with_card {
+            scene.render_card(&self.geom, &self.ui, reveal, &mut self.painter)
+        } else {
+            scene.plain_card()
+        };
         let c = scene.card;
         blit(canvas, (w * 4) as usize, &pm, c.x, c.y);
+        // The corner controls only exist once the input view starts showing.
+        let shown = with_card && reveal > 0.0;
+        let drop = Corner::drop(reveal);
+        let corner = scene.render_corner(shown.then_some(&self.ui), drop, &mut self.painter);
+        let k = scene.corner_px;
+        blit(canvas, (w * 4) as usize, &corner, k.x, k.y);
+        let power = scene.render_power(shown, drop);
+        if let Some((r, pm)) = &power {
+            blit(canvas, (w * 4) as usize, pm, r.x, r.y);
+        }
 
         let surf = s.kind.wl_surface();
         surf.set_buffer_scale(scale);
@@ -323,6 +364,10 @@ impl App {
             surf.damage_buffer(0, 0, w as i32, h as i32);
         } else {
             surf.damage_buffer(c.x as i32, c.y as i32, c.w as i32, c.h as i32);
+            surf.damage_buffer(k.x as i32, k.y as i32, k.w as i32, k.h as i32);
+            if let Some((r, _)) = power {
+                surf.damage_buffer(r.x as i32, r.y as i32, r.w as i32, r.h as i32);
+            }
         }
         buf.busy.store(true, Ordering::Release);
         surf.commit();
@@ -396,13 +441,58 @@ impl App {
             TimeoutAction::ToDuration(BLINK)
         });
         self.blink = tok.ok();
+        let tok = self.handle.insert_source(Timer::from_duration(Duration::from_secs(1)), |_, _, app: &mut App| {
+            app.on_tick();
+            TimeoutAction::ToDuration(Duration::from_secs(1))
+        });
+        self.tick = tok.ok();
     }
 
     pub fn stop_blink(&mut self) {
-        if let Some(t) = self.blink.take() {
+        for t in [self.blink.take(), self.tick.take(), self.anim.take()].into_iter().flatten() {
             self.handle.remove(t);
         }
         self.stop_repeat();
+    }
+
+    /// The clock changed minute, or the input view sat idle: redraw, or go back to the clock.
+    fn on_tick(&mut self) {
+        let now = crate::ui::clock_now();
+        if now != self.ui.clock {
+            self.ui.clock = now;
+            self.redraw_card();
+        }
+        let idle = self.last_input.elapsed() >= IDLE;
+        if idle && self.ui.reveal.input() && !self.ui.busy && self.ui.password().is_empty() {
+            self.show_input(false);
+        }
+    }
+
+    /// Switch between the clock and the input view, animated.
+    pub fn show_input(&mut self, input: bool) {
+        let now = Instant::now();
+        if !self.ui.reveal.set(input, now) {
+            return;
+        }
+        if !input {
+            self.ui.clear();
+            if self.ui.status.as_ref().is_some_and(|s| s.tone != crate::ui::Tone::Error) {
+                self.ui.status = None;
+            }
+        }
+        self.redraw_card();
+        if self.anim.is_none() {
+            let tok = self.handle.insert_source(Timer::from_duration(FRAME), |_, _, app: &mut App| {
+                app.redraw_card();
+                if app.ui.reveal.settled(Instant::now()) {
+                    app.anim = None;
+                    TimeoutAction::Drop
+                } else {
+                    TimeoutAction::ToDuration(FRAME)
+                }
+            });
+            self.anim = tok.ok();
+        }
     }
 
     fn stop_repeat(&mut self) {
@@ -427,6 +517,21 @@ impl App {
 
     pub fn act(&mut self, action: Action) {
         self.ui.caret = true;
+        self.last_input = Instant::now();
+        if !self.ui.reveal.input() {
+            // Clock view: Space, Enter or typing open the input view (what's typed is kept);
+            // layout and power keys work as usual; the rest waits for the field.
+            match &action {
+                Action::Submit | Action::Text(_) if self.ui.busy => return,
+                Action::Submit => return self.show_input(true),
+                Action::Text(t) if t == " " => return self.show_input(true),
+                Action::Text(_) => self.show_input(true),
+                Action::CycleLayout | Action::F(_) => {}
+                _ => return,
+            }
+        } else if matches!(action, Action::Escape) && !self.ui.busy {
+            self.show_input(false);
+        }
         match &action {
             Action::Text(t) if !self.ui.busy => {
                 self.ui.push(t);
@@ -452,16 +557,30 @@ impl App {
 
     fn click(&mut self, surface: &wl_surface::WlSurface, x: f64, y: f64) {
         let Some(i) = self.surface_index(surface) else { return };
+        self.last_input = Instant::now();
+        if !self.ui.reveal.input() {
+            // Clock view: a click anywhere opens the input view.
+            return self.show_input(true);
+        }
+        if self.ui.power_buttons {
+            let (w, h) = self.surfaces[i].size;
+            let hit =
+                Geometry::power_buttons(w as f32, h as f32).into_iter().find(|(_, r)| r.contains(x as f32, y as f32));
+            if let Some((p, _)) = hit {
+                self.act(Action::F(if p == crate::logind::Power::PowerOff { 1 } else { 2 }));
+                return;
+            }
+        }
         if self.card_index() != Some(i) {
             return;
         }
-        let s = &self.surfaces[i];
-        let (ox, oy) = self.geom.origin(s.size.0 as f32, s.size.1 as f32);
-        match self.geom.hit(x as f32 - ox, y as f32 - oy, &self.ui) {
+        let login = matches!(self.mode, ModeState::Login(_));
+        let corner = Corner::new(login, self.surfaces[i].size.1 as f32);
+        match corner.hit(x as f32, y as f32, &self.ui) {
             Some(Hit::Layout) => self.act(Action::CycleLayout),
             Some(Hit::PrevSession) => self.pick(-1),
             Some(Hit::NextSession) => self.pick(1),
-            Some(Hit::Field) | None => {}
+            None => {}
         }
     }
 

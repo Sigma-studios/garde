@@ -59,6 +59,17 @@ impl Painter {
         buf.layout_runs().map(|r| r.line_w).fold(0.0, f32::max)
     }
 
+    /// Lines `text` wraps to in width `w`, capped at `st.max_lines` (0 for no text).
+    pub fn line_count(&mut self, text: &str, st: &Style, w: f32) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+        if st.max_lines <= 1 {
+            return 1;
+        }
+        self.layout(text, st, Some(w)).layout_runs().count().clamp(1, st.max_lines)
+    }
+
     /// Draw `text` in the box starting at (x, y) of width `w`. Single-line text that doesn't fit
     /// is ellipsized; multi-line text wraps and stops at `max_lines`. Returns the height used.
     pub fn draw(&mut self, pm: &mut Pixmap, text: &str, st: &Style, x: f32, y: f32, w: f32) -> f32 {

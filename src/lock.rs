@@ -181,6 +181,7 @@ pub fn start(app: &mut App) -> Result<(), String> {
     app.ui.masked = true;
     app.ui.placeholder = "Password".into();
     app.ui.status = None;
+    app.ui.reveal = crate::ui::Reveal::new();
     let outputs: Vec<_> = app.outputs.outputs().collect();
     for o in outputs {
         add_surface(app, o);

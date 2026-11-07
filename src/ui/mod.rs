@@ -85,7 +85,7 @@ pub struct Ui {
     pub name: String,
     /// Clock or input view, and the transition between them.
     pub reveal: Reveal,
-    /// The clock view's time ("14:05") and date ("7 November 2026").
+    /// The clock view's time ("14:05") and date ("7th of November 2026").
     pub clock: (String, String),
     password: Zeroizing<String>,
     /// Hidden prompt (password) or visible one (PAM asked for something echoed).
@@ -176,7 +176,7 @@ impl Ui {
     }
 }
 
-/// Local time as ("14:05", "7 November 2026"), 24-hour.
+/// Local time as ("14:05", "7th of November 2026"), 24-hour.
 pub fn clock_now() -> (String, String) {
     let t = unsafe { libc::time(std::ptr::null_mut()) };
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -202,7 +202,14 @@ fn clock_text(hour: i32, min: i32, mday: i32, mon: i32, year: i32) -> (String, S
         "December",
     ];
     let month = MONTHS.get(mon as usize).copied().unwrap_or("");
-    (format!("{hour:02}:{min:02}"), format!("{mday} {month} {year}"))
+    let suffix = match (mday % 10, mday % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    (format!("{hour:02}:{min:02}"), format!("{mday}{suffix} of {month} {year}"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -220,9 +227,9 @@ impl Rect {
 }
 
 pub const CARD_W: f32 = 340.0;
-pub const PAD: f32 = 26.0;
-pub const NAME_SIZE: f32 = 22.0;
-pub const NAME_H: f32 = 30.0;
+pub const PAD: f32 = 18.0;
+pub const NAME_SIZE: f32 = 28.0;
+pub const NAME_H: f32 = 38.0;
 pub const FIELD_H: f32 = 42.0;
 pub const SMALL: f32 = 13.5;
 pub const LINE: f32 = 19.0;
@@ -286,7 +293,7 @@ impl Geometry {
         let inner = CARD_W - 2.0 * PAD;
         let mut y = PAD;
         let name = Rect { x: PAD, y, w: inner, h: NAME_H };
-        y += NAME_H + 14.0;
+        y += NAME_H + 12.0;
         let field = Rect { x: PAD, y, w: inner, h: FIELD_H };
         y += FIELD_H;
         let clock_h = TIME_H + DATE_H;
@@ -520,7 +527,18 @@ mod tests {
 
     #[test]
     fn clock_text_is_24_hour() {
-        assert_eq!(clock_text(9, 5, 7, 10, 2026), ("09:05".into(), "7 November 2026".into()));
+        assert_eq!(clock_text(9, 5, 7, 10, 2026), ("09:05".into(), "7th of November 2026".into()));
+        let day = |d| clock_text(0, 0, d, 11, 2026).1;
+        assert_eq!(day(1), "1st of December 2026");
+        assert_eq!(day(2), "2nd of December 2026");
+        assert_eq!(day(3), "3rd of December 2026");
+        assert_eq!(day(11), "11th of December 2026");
+        assert_eq!(day(12), "12th of December 2026");
+        assert_eq!(day(13), "13th of December 2026");
+        assert_eq!(day(21), "21st of December 2026");
+        assert_eq!(day(22), "22nd of December 2026");
+        assert_eq!(day(23), "23rd of December 2026");
+        assert_eq!(day(31), "31st of December 2026");
         assert_eq!(clock_text(23, 59, 31, 11, 2026).0, "23:59");
     }
 

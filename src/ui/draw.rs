@@ -544,3 +544,54 @@ mod tests {
         assert_eq!(&canvas[16..20], &[30, 20, 10, 255]);
     }
 }
+
+/// Whole-screen renders for looking at the layout:
+/// `cargo test --release screenshots -- --ignored`, PNGs in target/screenshots.
+/// GARDE_WALLPAPER, GARDE_SIZE (2560x1440) and GARDE_SCALE (1) pick the screen.
+#[cfg(test)]
+mod screenshots {
+    use super::*;
+    use crate::ui::Tone;
+
+    fn shot(name: &str, ui: &Ui, geom: &Geometry, login: bool) {
+        let wall = Wallpaper::load(std::env::var_os("GARDE_WALLPAPER").as_deref().map(Path::new));
+        let size = std::env::var("GARDE_SIZE").unwrap_or_else(|_| "2560x1440".into());
+        let (w, h) = size.split_once('x').map(|(w, h)| (w.parse().unwrap(), h.parse().unwrap())).unwrap();
+        let scale: f32 = std::env::var("GARDE_SCALE").map(|s| s.parse().unwrap()).unwrap_or(1.0);
+        let look = Look { dim: 0.35, blur: 0.0 };
+        let mut painter = Painter::new("Noto Sans");
+        let scene = Scene::build(&wall, w, h, scale, geom, &look, login);
+        let mut frame = scene.bg.clone();
+        let mut put = |pm: &Pixmap, x: u32, y: u32| {
+            frame.draw_pixmap(x as i32, y as i32, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+        };
+        put(&scene.render_card(geom, ui, 1.0, &mut painter), scene.card.x, scene.card.y);
+        put(&scene.render_corner(Some(ui), 0.0, &mut painter), scene.corner_px.x, scene.corner_px.y);
+        if let Some((r, pm)) = scene.render_power(true, 0.0) {
+            put(&pm, r.x, r.y);
+        }
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/screenshots");
+        std::fs::create_dir_all(&dir).unwrap();
+        frame.save_png(dir.join(format!("{name}.png"))).unwrap();
+        // And the card alone, with a margin, for a closer look.
+        let m = (40.0 * scale) as u32;
+        let r = scene.card;
+        let (x, y) = (r.x.saturating_sub(m), r.y.saturating_sub(m));
+        let crop = frame.clone_rect(tiny_skia::IntRect::from_xywh(x as i32, y as i32, r.w + 2 * m, r.h + 2 * m).unwrap()).unwrap();
+        crop.save_png(dir.join(format!("{name}-card.png"))).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn screenshots() {
+        let mut ui = Ui::new("Sigma".into());
+        ui.layout = "fr".into();
+        ui.layouts_available = true;
+        shot("login-empty", &ui, &Geometry::new(false, 0), true);
+        ui.push("hunter2hunter2");
+        shot("login-typed", &ui, &Geometry::new(false, 0), true);
+        ui.caps = true;
+        ui.set_status(Tone::Error, "Wrong password");
+        shot("lock-caps-error", &ui, &Geometry::new(true, 1), false);
+    }
+}
